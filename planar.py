@@ -5,38 +5,63 @@ import matplotlib.pyplot as plt
 import neural_utils as neural
 from mpl_toolkits import mplot3d
 
-def f(x_hat):
-    '''requires 2d input tensor'''
+def f(x):
     A = torch.tensor([[0.,-1.], [1.,0.]])
-    return torch.matmul( x_hat, A.T)
+    return torch.matmul( x, A.T)
 
 def exact(t, x0):
     t = t.numpy()
     e1 = np.array([1,0])
     e2 = np.array([0,1])
-    return torch.from_numpy(x0[0] * (np.cos(t) * e2 - np.sin(t) * e1) + x0[1]*(np.cos(t) * e1 + np.sin(t) * e2))
+    return x0[0] * (np.cos(t) * e2 - np.sin(t) * e1) + x0[1]*(np.cos(t) * e1 + np.sin(t) * e2)
 
 t0 = torch.tensor(0.).view(-1,1).requires_grad_(True)
-x0 = np.array([1,1])
+x0 = torch.tensor([1,1])
 
-t_train = torch.rand(100).view(-1,1).requires_grad_(True)
+t_train = (2 * np.pi*(torch.rand(100) - 0.5)).view(-1,1).requires_grad_(True)
 
-t_test = torch.linspace(0,1,300).view(-1,1)
-y_exact = exact(t_test, x0)
+t_test = torch.linspace(-np.pi,np.pi,1000).view(-1,1)
+
+x_exact = exact(t_test, x0)
+
+x_exact1 = x_exact[:,0]
+x_exact2 = x_exact[:,1]
 
 model = neural.FCN(1,2,20,3)
 
 optimiser = torch.optim.Adam(model.parameters(),lr=1e-3)
 
-loss_history = []
-#begin training
-for i in range(1000):
-    loss = neural.training_step(optimiser, f, t_train,t0,x0, model)
-    loss_history.append(torch.flatten(loss.detach()))
+#define minibatch size
+minibatch = 5
+#define epochs 
+epochs = 200
 
-    #display results as training progresses
-    if i % 200 == 0: 
-        y = model(t_test).detach()
+
+loss_history = []
+
+#begin training
+
+for epoch in range(epochs):
+
+    # X is a torch Variable
+    permutation = torch.randperm(t_train.shape[0])
+    epoch_loss = 0
+
+    for i in range(0,t_train.shape[0], minibatch):
+
+            indices = permutation[i:i+minibatch]
+
+            batch_t = t_train[indices]
+
+            epoch_loss += neural.training_step(optimiser, f, batch_t,t0,x0, model).detach()
+    
+    loss_history.append(epoch_loss)
+
+    if epoch % 50 == 0:
+
+        x = model(t_test).detach()
+        x_1 = x[:,0]
+        x_2 = x[:,1]
 
         plt.figure(figsize=(6,2.5))
         plt.scatter(t_train.detach()[:,0], 
@@ -45,13 +70,22 @@ for i in range(1000):
         plt.scatter(t0.detach()[:,0], 
                     0, s=40, lw=0, color="tab:orange", alpha=0.6)
                     
-        plt.plot(y_exact[:,0], label="Exact solution", linewidth=2,color="tab:blue", alpha=0.6)
-        plt.plot(y[:,0], '--', label="PINN solution", linewidth=2, color="tab:red")
-        plt.title("Comparison")
+        plt.plot(x_exact1,x_exact2, label="Exact solution", linewidth=2,color="tab:blue", alpha=0.6)
+        plt.plot(x_1,x_2, '--', label="PINN solution", linewidth=2, color="tab:red")
+        plt.title(f"Comparison after {epoch} epochs")
         plt.legend()
         plt.show()
 
-plt.plot(range(1000), loss_history, label="Learning Curve")
+plt.plot(range(epochs), loss_history, label="Learning Curve")
 plt.show()
+
+print("final training loss:", loss_history[-1])
+
+x = model(t_test).detach()
+
+test_loss = torch.mean(torch.norm(x_exact - x)**2)
+
+print("Test loss:", test_loss)
+
 
     

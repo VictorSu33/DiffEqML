@@ -25,17 +25,18 @@ class FCN(nn.Module):
         return x
     
 
-def training_step(optimiser, f,t, t_0, y_0, model, lambda1=1, lambda2=1):
+def training_step(optimiser, f,t, t0, x0, model, lambda1=1, lambda2=1):
     '''note higher order problems need to be converted into first order vector problems'''
     optimiser.zero_grad()
-    y = model(t)
-    print(f(y).shape)
+    x = model(t)
 
-    dy_dt = torch.autograd.grad(y,t, torch.ones_like(y), create_graph=True)[0]
+    #dy_dt = torch.autograd.grad(y,t, torch.ones_like(y), create_graph=True)[0]
     #dy_dt = torch.autograd.functional.jacobian(model, t)
+    dx_dt =  torch.func.vmap (torch.func.jacfwd (model), in_dims = (0,)) (t).squeeze()
 
-    print(dy_dt.shape)
-    loss = lambda1 * torch.mean((dy_dt - f(y))**2) +  lambda2 * (y_0 - model(t_0))**2
+    loss1 = lambda1 * torch.mean(torch.norm((dx_dt - f(x).squeeze()))**2) 
+    loss2 = lambda2 * torch.norm(x0 - model(t0))**2
+    loss = loss1 + loss2
     loss.backward()
     optimiser.step()
     return loss
