@@ -8,7 +8,7 @@ class FCN(nn.Module):
     
     def __init__(self, N_INPUT, N_OUTPUT, N_HIDDEN, N_LAYERS):
         super().__init__()
-        activation = nn.Tanh
+        activation = nn.ReLU
         self.fcs = nn.Sequential(*[
                         nn.Linear(N_INPUT, N_HIDDEN),
                         activation()])

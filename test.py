@@ -21,7 +21,7 @@ t_train = torch.rand(33).view(-1,1).requires_grad_(True)
 t_test = torch.linspace(-2,2,300).view(-1,1)
 x_exact = exact(t_test)
 
-model = neural.FCN(1,1,20,3)
+model = neural.FCN(1,1,5,2)
 
 optimiser = torch.optim.Adam(model.parameters(),lr=1e-3)
 

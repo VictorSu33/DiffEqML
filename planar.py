@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
 import neural_utils as neural
-from mpl_toolkits import mplot3d
 
 def f(x):
     A = torch.tensor([[0.,-1.], [1.,0.]])
@@ -18,7 +17,7 @@ def exact(t, x0):
 t0 = torch.tensor(0.).view(-1,1).requires_grad_(True)
 x0 = torch.tensor([1,1])
 
-t_train = (2 * np.pi*(torch.rand(100) - 0.5)).view(-1,1).requires_grad_(True)
+t_train = (2 * np.pi*(torch.rand(30) - 0.5)).view(-1,1).requires_grad_(True)
 
 t_test = torch.linspace(-np.pi,np.pi,1000).view(-1,1)
 
@@ -27,14 +26,16 @@ x_exact = exact(t_test, x0)
 x_exact1 = x_exact[:,0]
 x_exact2 = x_exact[:,1]
 
-model = neural.FCN(1,2,20,3)
+#watch out for overfitting
+
+model = neural.FCN(1,2,10,3)
 
 optimiser = torch.optim.Adam(model.parameters(),lr=1e-3)
 
 #define minibatch size
-minibatch = 5
+minibatch = 3
 #define epochs 
-epochs = 200
+epochs = 500
 
 
 loss_history = []
@@ -63,6 +64,10 @@ for epoch in range(epochs):
         x_1 = x[:,0]
         x_2 = x[:,1]
 
+        x_train = model(t_train).detach()
+        x_train1 = x_train[:,0]
+        x_train2 = x_train[:,1]
+
         plt.figure(figsize=(6,2.5))
         plt.scatter(t_train.detach()[:,0], 
                     torch.zeros_like(t_train)[:,0], s=20, lw=0, color="tab:green", alpha=0.6)
@@ -71,7 +76,8 @@ for epoch in range(epochs):
                     0, s=40, lw=0, color="tab:orange", alpha=0.6)
                     
         plt.plot(x_exact1,x_exact2, label="Exact solution", linewidth=2,color="tab:blue", alpha=0.6)
-        plt.plot(x_1,x_2, '--', label="PINN solution", linewidth=2, color="tab:red")
+        plt.plot(x_1,x_2, '--', label="PINN solution test", linewidth=2, color="tab:red")
+        plt.scatter(x_train1,x_train2, s = 20, label="PINN solution train", color="tab:purple",alpha=0.6)
         plt.title(f"Comparison after {epoch} epochs")
         plt.legend()
         plt.show()
@@ -87,5 +93,8 @@ test_loss = torch.mean(torch.norm(x_exact - x)**2)
 
 print("Test loss:", test_loss)
 
+#test for generalization outside of interval.
 
+#def generalization(epsilon,lower,upper,model, exact):
+    
     
