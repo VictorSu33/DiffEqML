@@ -8,7 +8,7 @@ from mpl_toolkits import mplot3d
 
 device = torch.device("cuda:0")
 
-class Lyapunov_Known(nn.module):
+class Lyapunov_Known(nn.Module):
 
     '''
     Partition state vector and create subnetworks to avoid curse of dimensionality 
@@ -50,20 +50,15 @@ class Lyapunov_Known(nn.module):
 
         return x
 
-class Lyapunov_Unkown(nn.module):
-    #create fully connected neural network with softplus to return only nonnegative values
-
-    def __init__(self, N_INPUT, N_HIDDEN, d_max =None):
+class Lyapunov_Unkown(nn.Module):
+    def __init__(self, N_INPUT, N_HIDDEN, d_max =1):
         #hidden should be a multiple of input?
         super().__init__()
         
-        if not d_max:
-            self.d_max = N_HIDDEN
-        else:
-            self.d_max = d_max
+        self.d_max = d_max
 
         self.fcs = nn.Linear(N_INPUT, N_HIDDEN)
-        self.conv = nn.Sequential(nn.Conv1d(in_channels=N_HIDDEN, out_channels=N_HIDDEN, kernel_size=1, groups= N_HIDDEN // self.d_max), nn.Tanh())
+        self.conv = nn.Sequential(nn.Conv1d(in_channels=N_HIDDEN, out_channels=N_HIDDEN, kernel_size=1, groups= N_HIDDEN // self.d_max), nn.ReLU())
 
         #is ReLU okay?
         self.fce = nn.Sequential(
@@ -72,15 +67,13 @@ class Lyapunov_Unkown(nn.module):
         
     def forward(self, x):
         x = self.fcs(x)
-        x = self.conv(x)
-
-
-        x = torch.cat(x)
+        x = x.unsqueeze(-1)
+        x = self.conv(x).squeeze(-1)
         x= self.fce(x)
 
         return x
 
-class Lyapunov_Loss(nn.module):
+class Lyapunov_Loss(nn.Module):
     
 
     def __init__(self, lambda1=1,lambda2=1):
@@ -98,17 +91,17 @@ class Lyapunov_Loss(nn.module):
     def gradient_loss(self,f_data, x,V):
         #gradient loss of zubov pde
         dV_dx = torch.func.vmap (torch.func.jacfwd(V), in_dims = (0,)) (x).squeeze()
-        loss = torch.mean((torch.dot(dV_dx, f_data) + torch.norm(x)**2)**2)
+        loss = torch.mean((torch.einsum('ij,ij->i',  dV_dx, f_data) + torch.norm(x, dim=1)**2)**2)
         return loss
 
     def forward(self, y_pred, upper,lower,zeroes,f_data, x,V):
-        return self.lambda1 * self.bound_loss(self, y_pred, upper, lower,zeroes) + self.lambda2 * self.gradient_loss(self,f_data, x,V)
+        return self.lambda1 * self.bound_loss(y_pred, upper, lower,zeroes) + self.lambda2 * self.gradient_loss(f_data, x,V)
     
-def f(x,b):
+def f(x,b=0):
     #Nonlinear pendulum system from Morris, Hirsch & Smale
     x_0 = x[:, 1]
     x_1 = -b*x[:, 1]-torch.sin(x[:,0])
-    return torch.cat([x_0,x_1])
+    return torch.cat([x_0.reshape(-1,1),x_1.reshape(-1,1)], axis = 1)
 
 # define the upper bound for the boundary condition
 def upperbound ( x ):
@@ -119,12 +112,13 @@ def lowerbound ( x ):
     return 0.1*x[:,0]**2 + 0.1*x[:,1]**2
 
 #generate training data
-x_train = (2*torch.rand((1000,2))-1).requires_grad_(True).to(device)
+train_num = 1000
+x_train = (2*torch.rand((train_num,2))-1).requires_grad_(True).to(device)
 
 upper = upperbound(x_train)
 lower = lowerbound(x_train)
 f_train = f(x_train)
-zeroes = torch.zeros(upper.shape)
+zeroes = torch.zeros(upper.shape).to(device)
 
 epochs = 20
 tol = 1e-5
@@ -134,17 +128,31 @@ gradweight = 1
 def train_step():
     pass
 
+'''
+print("upper shape", upper.shape)
+print("lower shape", lower.shape)
+print("f_train shape", f_train.shape)
+print("x_train shape", x_train.shape)
+print("zeroes shape", zeroes.shape)
+'''
+
+
 train_data = TensorDataset(upper,lower, f_train, x_train, zeroes)
 train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
 
 #hyperparameters
-lyapunov = Lyapunov_Unkown(2,16,4)
-lyapunov_loss = Lyapunov_Loss()
+
+input_dim = 2
+hidden_dim = 16
+sub_dim = 4
+
+lyapunov = Lyapunov_Unkown(input_dim,hidden_dim,sub_dim).to(device)
+lyapunov_loss = Lyapunov_Loss().to(device)
 
 lyapunov.to(device)
 lyapunov_loss.to(device)
 
-optimiser = torch.optim.Adam(Lyapunov_Unkown.parameters(),lr=1e-3)
+optimiser = torch.optim.Adam(lyapunov.parameters(),lr=1e-3)
 
 loss_values = []
 
@@ -159,14 +167,15 @@ for epoch in range(epochs):
         optimiser.zero_grad()
         y_batch = lyapunov(x_batch)
 
-        loss = torch.sum(lyapunov_loss(y_batch, upper_batch,lower_batch,zeroes_batch, f_batch, x_train, lyapunov))
+        loss = lyapunov_loss(y_batch, upper_batch,lower_batch,zeroes_batch, f_batch, x_batch, lyapunov)
+        print(loss)
         loss.backward()
         
         optimiser.step()
 
-        epoch_loss += loss
+        epoch_loss += loss.detach()
 
-        mlv = torch.maximum(mlv,loss/batch_size)
+        mlv = max(mlv,loss/batch_size)
         slv = slv + loss
     loss_values.append(epoch_loss.detach()/x_train.shape[0])
 
@@ -178,3 +187,65 @@ for epoch in range(epochs):
 torch.save(lyapunov.state_dict(), "lyapunov2d.pt")
 
 plt.plot(range(epochs), loss_values, label="Learning Curve")
+
+#plot graph
+
+# define resolution
+numpoints = 30
+
+# define plotting range and mesh
+x = np.linspace(-1, 1, numpoints)
+y = np.linspace(-1, 1, numpoints)
+
+X, Y = np.meshgrid(x, y)
+
+s = X.shape
+
+Z_grad = np.zeros(s)
+Z_func = np.zeros(s)
+DT = torch.zeros((numpoints**2,input_dim)).to(device)
+
+# convert mesh into point vector for which the model can be evaluated
+c = 0
+for i in range(s[0]):
+    for j in range(s[1]):
+        DT[c,0] = X[i,j]
+        DT[c,1] = Y[i,j]
+        c = c+1
+
+# evaluate model (= Lyapunov function values V)
+Ep = lyapunov(DT)
+
+# convert point vector to tensor for evaluating x-derivative
+tDT = torch.tensor(DT)
+
+# evaluate gradients DV of Lyapunov function
+grads = torch.func.vmap (torch.func.jacfwd(lyapunov), in_dims = (0,)) (DT)
+
+# compute orbital derivative DVf
+Ee = torch.sum(torch.dot(grads, f(DT).T))
+
+# copy V and DVf values into plottable format
+c = 0
+for i in range(s[0]):
+    for j in range(s[1]):
+        Z_grad[i,j] = Ee[c]
+        Z_func[i,j] = Ep[c]
+        c = c+1
+
+# define figure
+fig = plt.figure()
+ax = plt.axes(projection='3d')
+
+ax.set_xlabel('x')
+ax.set_ylabel('y')
+ax.set_zlabel('z')
+
+# plot values V
+ax.plot_surface(X, Y, Z_func, rstride=1, cstride=1,
+                cmap='viridis', edgecolor='none')
+
+# plot orbital derivative DVf
+ax.plot_wireframe(X, Y, Z_grad, rstride=1, cstride=1)
+
+plt.show()
