@@ -17,7 +17,7 @@ def exact(t, x0):
 t0 = torch.tensor(0.).view(-1,1).requires_grad_(True)
 x0 = torch.tensor([1,1])
 
-t_train = (2 * np.pi*(torch.rand(30) - 0.5)).view(-1,1).requires_grad_(True)
+t_train = (2 * np.pi*(torch.rand(100) - 0.5)).view(-1,1).requires_grad_(True)
 
 t_test = torch.linspace(-np.pi,np.pi,1000).view(-1,1)
 
@@ -33,10 +33,11 @@ model = neural.FCN(1,2,10,3)
 optimiser = torch.optim.Adam(model.parameters(),lr=1e-3)
 
 #define minibatch size
-minibatch = 3
+minibatch = 8
 #define epochs 
-epochs = 500
+epochs = 1000
 
+num_batches = np.ceil(epochs/minibatch)
 
 loss_history = []
 
@@ -58,7 +59,7 @@ for epoch in range(epochs):
     
     loss_history.append(epoch_loss)
 
-    if epoch % 50 == 0:
+    if epoch % 100 == 0:
 
         x = model(t_test).detach()
         x_1 = x[:,0]

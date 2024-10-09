@@ -8,7 +8,7 @@ class FCN(nn.Module):
     
     def __init__(self, N_INPUT, N_OUTPUT, N_HIDDEN, N_LAYERS):
         super().__init__()
-        activation = nn.ReLU
+        activation = nn.Tanh
         self.fcs = nn.Sequential(*[
                         nn.Linear(N_INPUT, N_HIDDEN),
                         activation()])
@@ -30,8 +30,8 @@ def training_step(optimiser, f,t, t0, x0, model, lambda1=1, lambda2=1):
     optimiser.zero_grad()
     x = model(t)
 
-    #dy_dt = torch.autograd.grad(y,t, torch.ones_like(y), create_graph=True)[0]
-    #dy_dt = torch.autograd.functional.jacobian(model, t)
+    #dx_dt = torch.autograd.grad(x,t, torch.ones_like(x), create_graph=True)[0]
+    #dx_dt = torch.autograd.functional.jacobian(model, t)
     dx_dt =  torch.func.vmap (torch.func.jacfwd (model), in_dims = (0,)) (t).squeeze()
 
     loss1 = lambda1 * torch.mean(torch.norm((dx_dt - f(x).squeeze()))**2) 
