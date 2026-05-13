@@ -6,8 +6,12 @@
 
 # Study problems were boundary conditions are non uniform. eg laplace with sin on top edge. seems like the base line model preforms significantly worse. Retry after fixing model definition mistake
 
+# Investigate impact of domain 
+
 # Do some loss landscape visualization
 
 # Try some spectral bias experiments
 
 # Try some NTK experiments 
+
+# Option dynamic inverse problem

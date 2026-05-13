@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 import copy
 
-print("test")
 class Sin(nn.Module):
     def forward(self, x):
         return torch.sin(x)
@@ -84,7 +83,7 @@ def sample(dim, N, domain_map=identity_map, device='cpu'):
     return domain_map(torch.tensor(samples, dtype=torch.float32, device=device))
 
 
-def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, evo=False, device='cpu'):
+def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, domain_map, evo=False, device='cpu', checkpoint = False):
     """
     Train a physics-informed neural network.
     
@@ -107,25 +106,24 @@ def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, evo=F
         frame: list of model predictions on grid (if evo=True)
         frame_collocation: list of collocation points used (if evo=True)
         best_state: best model state dict
-        best_avg_loss: best averaged loss
+        best_loss: best loss
     """
     losses = []
     losses_data = []
     losses_phys = []
     frame = []
-    frame_collocation = []
     
-    best_avg_loss = float("inf")
+    best_loss = float("inf")
     best_state = None
+    relative_delta = 1e-3
 
     if evo:
         N_grid = 100
         x = torch.linspace(0, 1, N_grid, device=device)
         y = torch.linspace(0, 1, N_grid, device=device)
         X, Y = torch.meshgrid(x, y, indexing="ij")
-        XY = torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1)
+        XY = domain_map(torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1))
 
-    avg_loss = 0
     for epoch in range(epochs):
         optimizer.zero_grad()
 
@@ -133,7 +131,6 @@ def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, evo=F
         loss_phys = physics_loss(model, X_col, f)
 
         loss = loss_data + lambda_phys * loss_phys
-        avg_loss += loss.item()
 
         losses.append(loss.item())
         losses_data.append(loss_data.item())
@@ -141,14 +138,13 @@ def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, evo=F
         loss.backward()
         optimizer.step()
 
+        current_loss = loss.item()
+        if checkpoint and current_loss < best_loss * (1 - relative_delta):
+            best_loss = current_loss
+            best_state = copy.deepcopy(model.state_dict())
+
         if epoch % 100 == 0:
             print(epoch, loss.item(), loss_data.item(), loss_phys.item())
-            avg_loss = avg_loss/100
-            if epoch > 0.75*epochs and avg_loss < best_avg_loss:
-                best_avg_loss = avg_loss
-                best_state = copy.deepcopy(model.state_dict())
-
-            avg_loss = 0
 
             if evo:
                 model.eval()
@@ -156,11 +152,10 @@ def train(epochs, optimizer, X_data, U_data, model, f, lambda_phys, X_col, evo=F
                     U_pred = model(XY).reshape(N_grid, N_grid).detach().cpu().numpy()
                 
                 frame.append(U_pred)
-                frame_collocation.append(X_col.detach().cpu().numpy())
                 
                 model.train()
 
-    return losses, losses_data, losses_phys, frame, frame_collocation, best_state, best_avg_loss
+    return losses, losses_data, losses_phys, frame, best_state, best_loss
 
 def L2RE(u_pred, u_true):
 

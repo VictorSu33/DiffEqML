@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import matplotlib.pyplot as plt
-import copy
+import neural_utils as nu
 
 ################################################################################
 #                 Supporting functions for weights manipulation
@@ -127,10 +127,9 @@ def create_target_direction(net, net2):
 
     assert (net2 is not None)
     # direction between net2 and net
-    if dir_type == 'weights':
-        w = get_weights(net)
-        w2 = get_weights(net2)
-        direction = get_diff_weights(w, w2)
+    w = get_weights(net)
+    w2 = get_weights(net2)
+    direction = get_diff_weights(w, w2)
 
 
     return direction
@@ -143,7 +142,6 @@ def create_random_direction(net, ignore='biasbn', norm='filter'):
 
         Args:
           net: the given trained model
-          dir_type: 'weights' or 'states', type of directions.
           ignore: 'biasbn', ignore biases and BN parameters.
           norm: direction normalization method, including
                 'filter" | 'layer' | 'weight' | 'dlayer' | 'dfilter'
@@ -168,12 +166,24 @@ def create_random_direction(net, ignore='biasbn', norm='filter'):
 #                       Compute Surface
 ################################################################################
 
-def compute(net, weight, s, d, *grid_args):
+def compute(
+    net,
+    weight,
+    d,
+    x_range,
+    y_range,
+    X_data,
+    U_data,
+    X_col,
+    f,
+    lambda_phys
+):
     # grid args like (x_min, x_max, x_num, y_min, y_max, y_num)
     # without h5 file infrastructure
     # s is deepcopy of net state dict
 
-    x_min, x_max, x_num, y_min, y_max, y_num = grid_args
+    x_min, x_max, x_num = x_range
+    y_min, y_max, y_num = y_range
     x = np.linspace(x_min, x_max, x_num)
     y = np.linspace(y_min, y_max, y_num)
 
@@ -183,7 +193,41 @@ def compute(net, weight, s, d, *grid_args):
 
     coords = np.stack([X.flatten(), Y.flatten()], axis=1)
 
-    for coord in coords:
+    losses = np.zeros(len(coords))
+    for k, coord in enumerate(coords):
         set_weights(net, weight, d, coord)
-        loss = data_loss(net, X_data, u_data) + lambda_phys*physics_loss(net, X_col, f)
+        loss = nu.data_loss(net, X_data, U_data) + lambda_phys*nu.physics_loss(net, X_col, f)
 
+        losses[k] = loss.item()
+
+    losses = losses.reshape(X.shape)
+
+    set_weights(net, weight)
+
+    return X, Y, losses
+
+def plot(X,Y,losses, show = True, vmax=1):
+    
+    fig_contour = plt.figure()
+    contour = plt.contour(X, Y, losses, cmap='summer', vmax=vmax)
+    plt.clabel(contour, inline=1, fontsize=8)
+
+    # --------------------------------------------------------------------
+    # Plot 2D heatmaps
+    # --------------------------------------------------------------------
+    fig_heatmap = plt.figure()
+    heatmap = plt.imshow(losses, cmap='viridis', origin='lower', vmax=vmax)
+    plt.colorbar(heatmap)
+
+    # --------------------------------------------------------------------
+    # Plot 3D surface
+    # --------------------------------------------------------------------
+    fig_surface = plt.figure()
+    ax = fig_surface.add_subplot(111, projection='3d')
+    norm = plt.Normalize(vmin=losses.min(), vmax=vmax)
+    surf = ax.plot_surface(X, Y, losses, cmap='plasma', linewidth=0, antialiased=False, norm=norm)
+    fig_surface.colorbar(surf, shrink=0.5, aspect=15)
+
+    if show: plt.show()
+
+    return [fig_contour, fig_heatmap, fig_surface]
