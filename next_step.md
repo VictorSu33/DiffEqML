@@ -15,3 +15,5 @@
 # Try some NTK experiments 
 
 # Option dynamic inverse problem
+
+# test how number data points affect data loss noise
