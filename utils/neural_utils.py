@@ -83,6 +83,98 @@ from scipy.stats import qmc
 def identity_map(x: torch.Tensor) -> torch.Tensor:
     return x
 
+
+class Callback:
+    """Base callback class for training hooks."""
+    
+    def on_epoch_start(self, epoch: int) -> None:
+        pass
+    
+    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
+        pass
+    
+    def on_train_end(self) -> None:
+        pass
+    
+    def get_result(self):
+        """Return any results collected by this callback."""
+        return None
+
+
+class LoggingCallback(Callback):
+    """Logs training progress at regular intervals."""
+    
+    def __init__(self, log_interval: int = 100):
+        self.log_interval = log_interval
+    
+    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
+        if epoch % self.log_interval == 0:
+            print(f"Epoch {epoch:5d} | Total Loss: {loss:.4e} | Data Loss: {loss_data:.4e} | Physics Loss: {loss_phys:.4e}")
+
+
+class CheckpointCallback(Callback):
+    """Saves model checkpoints when loss improves."""
+    
+    def __init__(self):
+        self.best_loss = float('inf')
+        self.checkpoint_data = None
+    
+    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
+        if loss < self.best_loss:
+            self.best_loss = loss
+            # Store checkpoint data to be populated by trainer
+            self.checkpoint_data = {
+                'epoch': epoch,
+                'loss': loss
+            }
+    
+    def set_checkpoint_data(self, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, loss: float) -> None:
+        """Called by trainer to populate checkpoint with model/optimizer state."""
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.checkpoint_data = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': loss
+            }
+    
+    def get_result(self):
+        return self.checkpoint_data
+
+
+class FramesCallback(Callback):
+    """Captures model predictions on a grid for visualization."""
+    
+    def __init__(self, N_grid: int = 100, domain_map: callable = identity_map, 
+                 save_interval: int = 100, device: str = 'cpu'):
+        self.N_grid = N_grid
+        self.domain_map = domain_map
+        self.save_interval = save_interval
+        self.device = device
+        self.frames = []
+        self.grid = None
+    
+    def setup(self, model: nn.Module) -> None:
+        """Initialize grid for evaluation."""
+        x = torch.linspace(0, 1, self.N_grid, device=self.device)
+        y = torch.linspace(0, 1, self.N_grid, device=self.device)
+        X, Y = torch.meshgrid(x, y, indexing="ij")
+        self.grid = self.domain_map(torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1))
+    
+    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float, 
+                     model: nn.Module = None) -> None:
+        if epoch % self.save_interval == 0 and model is not None:
+            model.eval()
+            with torch.no_grad():
+                U_pred = model(self.grid).reshape(self.N_grid, self.N_grid).detach().cpu().numpy()
+            self.frames.append(U_pred)
+            model.train()
+    
+    def get_result(self):
+        return self.frames
+
+
 def sample(dim: int, N: int, domain_map: callable = identity_map, device: str = 'cpu') -> torch.Tensor:
     """
     Generate collocation points using Latin Hypercube sampling.
@@ -102,10 +194,10 @@ def sample(dim: int, N: int, domain_map: callable = identity_map, device: str = 
 
 
 def train(epochs: int, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U_data: torch.Tensor, 
-            model: nn.Module, f: callable, lambda_phys: float, X_col: torch.Tensor, domain_map: callable = identity_map,
-            evo: bool = False, device: str = 'cpu', checkpoint: bool = False, path: Optional[Path] = None) -> tuple: 
+          model: nn.Module, f: callable, lambda_phys: float, X_col: torch.Tensor, 
+          callbacks: list = None) -> tuple:
     """
-    Train a physics-informed neural network.
+    Train a physics-informed neural network with callback support.
     
     Args:
         epochs: number of training epochs
@@ -116,78 +208,57 @@ def train(epochs: int, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U
         f: residual function for physics loss
         lambda_phys: weight for physics loss
         X_col: collocation points for physics loss
-        evo: whether to save evolution frames (for visualization)
-        device: device to place tensors on
-        checkpoint: whether to save model checkpoints
-        save_name: name for checkpoint file (if checkpoint=True)
+        callbacks: list of Callback instances for logging, checkpointing, storing frames.
         
     Returns:
         losses: list of total losses per epoch
         losses_data: list of data losses per epoch
         losses_phys: list of physics losses per epoch
-        frame: list of model predictions on grid (if evo=True)
+        callback_results: dict mapping callback to its results
     """
-    if checkpoint and (path is None):
-        raise ValueError(
-            "Configuration Error: 'save_path' must be provided as a valid Path object "
-            "when 'checkpoint' is enabled."
-        )
+    if callbacks is None:
+        callbacks = []
+    
+    # Setup callbacks that need initialization
+    for callback in callbacks:
+        if isinstance(callback, FramesCallback):
+            callback.setup(model)
     
     losses = []
     losses_data = []
     losses_phys = []
-    frame = []
-    
-    checkpoint_dir = "checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    if evo:
-        N_grid = 100
-        x = torch.linspace(0, 1, N_grid, device=device)
-        y = torch.linspace(0, 1, N_grid, device=device)
-        X, Y = torch.meshgrid(x, y, indexing="ij")
-        XY = domain_map(torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1))
 
     for epoch in range(epochs):
         optimizer.zero_grad()
 
         loss_data = data_loss(model, X_data, U_data)
         loss_phys = physics_loss(model, X_col, f)
-
         loss = loss_data + lambda_phys * loss_phys
 
         losses.append(loss.item())
         losses_data.append(loss_data.item())
         losses_phys.append(loss_phys.item())
+        
         loss.backward()
         optimizer.step()
 
-        current_loss = loss.item()
-        if checkpoint and current_loss < best_loss:
+        # Call epoch end callbacks
+        for callback in callbacks:
+            if isinstance(callback, FramesCallback):
+                callback.on_epoch_end(epoch, loss.item(), loss_data.item(), loss_phys.item(), model=model)
+            elif isinstance(callback, CheckpointCallback):
+                callback.set_checkpoint_data(model, optimizer, epoch, loss.item())
+            else:
+                callback.on_epoch_end(epoch, loss.item(), loss_data.item(), loss_phys.item())
 
-            best_loss = current_loss
+    # Call train end callbacks
+    for callback in callbacks:
+        callback.on_train_end()
+
+    # Collect results from callbacks
+    callback_results = {type(cb).__name__: cb.get_result() for cb in callbacks}
     
-            checkpoint_data = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),       # No need for deepcopy when saving to disk!
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': best_loss
-            }
-            torch.save(checkpoint_data, path)
-
-        if epoch % 100 == 0:
-            print(epoch, loss.item(), loss_data.item(), loss_phys.item())
-
-            if evo:
-                model.eval()
-                with torch.no_grad():
-                    U_pred = model(XY).reshape(N_grid, N_grid).detach().cpu().numpy()
-                
-                frame.append(U_pred)
-                
-                model.train()
-
-    return losses, losses_data, losses_phys, frame
+    return losses, losses_data, losses_phys, callback_results
 
 def L2RE(u_pred: torch.Tensor, u_true: torch.Tensor) -> float:
 

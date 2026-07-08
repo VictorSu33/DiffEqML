@@ -10,8 +10,17 @@ dependencies = [
     "numpy",
     "matplotlib",
     "scipy",
-    "openTSNE",
 
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipykernel",
+    "jupyter",
+    "openTSNE",
+    "pandas",
+    "plotly",
+    "nbformat",
 ]
 
 [tool.setuptools]
