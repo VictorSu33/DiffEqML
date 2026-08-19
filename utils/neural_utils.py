@@ -1,10 +1,11 @@
-import os
 from pathlib import Path
 from typing import Optional
 import torch
 import torch.nn as nn
 import numpy as np
-import copy
+from tqdm import tqdm
+from collections import deque
+from utils.callbacks import *
 
 class Sin(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -83,98 +84,6 @@ from scipy.stats import qmc
 def identity_map(x: torch.Tensor) -> torch.Tensor:
     return x
 
-
-class Callback:
-    """Base callback class for training hooks."""
-    
-    def on_epoch_start(self, epoch: int) -> None:
-        pass
-    
-    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
-        pass
-    
-    def on_train_end(self) -> None:
-        pass
-    
-    def get_result(self):
-        """Return any results collected by this callback."""
-        return None
-
-
-class LoggingCallback(Callback):
-    """Logs training progress at regular intervals."""
-    
-    def __init__(self, log_interval: int = 100):
-        self.log_interval = log_interval
-    
-    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
-        if epoch % self.log_interval == 0:
-            print(f"Epoch {epoch:5d} | Total Loss: {loss:.4e} | Data Loss: {loss_data:.4e} | Physics Loss: {loss_phys:.4e}")
-
-
-class CheckpointCallback(Callback):
-    """Saves model checkpoints when loss improves."""
-    
-    def __init__(self):
-        self.best_loss = float('inf')
-        self.checkpoint_data = None
-    
-    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float) -> None:
-        if loss < self.best_loss:
-            self.best_loss = loss
-            # Store checkpoint data to be populated by trainer
-            self.checkpoint_data = {
-                'epoch': epoch,
-                'loss': loss
-            }
-    
-    def set_checkpoint_data(self, model: nn.Module, optimizer: torch.optim.Optimizer, epoch: int, loss: float) -> None:
-        """Called by trainer to populate checkpoint with model/optimizer state."""
-        if loss < self.best_loss:
-            self.best_loss = loss
-            self.checkpoint_data = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': loss
-            }
-    
-    def get_result(self):
-        return self.checkpoint_data
-
-
-class FramesCallback(Callback):
-    """Captures model predictions on a grid for visualization."""
-    
-    def __init__(self, N_grid: int = 100, domain_map: callable = identity_map, 
-                 save_interval: int = 100, device: str = 'cpu'):
-        self.N_grid = N_grid
-        self.domain_map = domain_map
-        self.save_interval = save_interval
-        self.device = device
-        self.frames = []
-        self.grid = None
-    
-    def setup(self, model: nn.Module) -> None:
-        """Initialize grid for evaluation."""
-        x = torch.linspace(0, 1, self.N_grid, device=self.device)
-        y = torch.linspace(0, 1, self.N_grid, device=self.device)
-        X, Y = torch.meshgrid(x, y, indexing="ij")
-        self.grid = self.domain_map(torch.stack([X.reshape(-1), Y.reshape(-1)], dim=1))
-    
-    def on_epoch_end(self, epoch: int, loss: float, loss_data: float, loss_phys: float, 
-                     model: nn.Module = None) -> None:
-        if epoch % self.save_interval == 0 and model is not None:
-            model.eval()
-            with torch.no_grad():
-                U_pred = model(self.grid).reshape(self.N_grid, self.N_grid).detach().cpu().numpy()
-            self.frames.append(U_pred)
-            model.train()
-    
-    def get_result(self):
-        return self.frames
-
-
 def sample(dim: int, N: int, domain_map: callable = identity_map, device: str = 'cpu') -> torch.Tensor:
     """
     Generate collocation points using Latin Hypercube sampling.
@@ -192,10 +101,19 @@ def sample(dim: int, N: int, domain_map: callable = identity_map, device: str = 
     samples = sampler.random(n=N)   # shape (N, dim)
     return domain_map(torch.tensor(samples, dtype=torch.float32, device=device))
 
+def train_step(model: nn.Module, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U_data: torch.Tensor,
+               f: callable, lambda_phys: float, X_col: torch.Tensor) -> tuple:
+    loss_data = data_loss(model, X_data, U_data)
+    loss_phys = physics_loss(model, X_col, f)
+    loss = loss_data + lambda_phys * loss_phys
+    
+    loss.backward()
+
+    return loss, loss_data, loss_phys
 
 def train(epochs: int, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U_data: torch.Tensor, 
           model: nn.Module, f: callable, lambda_phys: float, X_col: torch.Tensor, 
-          callbacks: list = None) -> tuple:
+          callbacks: list = None, schedule_config: dict = {"max_switch": 20000, "rel_tol": 1e-3, "patience": 500}) -> tuple:
     """
     Train a physics-informed neural network with callback support.
     
@@ -216,6 +134,7 @@ def train(epochs: int, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U
         losses_phys: list of physics losses per epoch
         callback_results: dict mapping callback to its results
     """
+
     if callbacks is None:
         callbacks = []
     
@@ -228,28 +147,91 @@ def train(epochs: int, optimizer: torch.optim.Optimizer, X_data: torch.Tensor, U
     losses_data = []
     losses_phys = []
 
-    for epoch in range(epochs):
-        optimizer.zero_grad()
+    MAX_SWITCH = schedule_config["max_switch"]
+    REL_TOL = schedule_config["rel_tol"]
+    PATIENCE = schedule_config["patience"]
 
-        loss_data = data_loss(model, X_data, U_data)
-        loss_phys = physics_loss(model, X_col, f)
-        loss = loss_data + lambda_phys * loss_phys
+    lbfgs = False
+    active_optimizer = optimizer
+    loss_window = deque(maxlen=PATIENCE)
+
+    for epoch in tqdm(range(epochs), leave=False, desc="Training"):
+
+        '''
+        if not lbfgs:
+            switch = False
+            if epoch > MAX_SWITCH:
+                switch = True
+            elif len(loss_window) == PATIENCE:
+                max_loss = max(loss_window)
+                min_loss = min(loss_window)
+                avg_loss = sum(loss_window) / PATIENCE
+                
+                rel_change = (max_loss - min_loss) / (avg_loss + 1e-8)
+                if rel_change < REL_TOL:
+                    switch = True
+            
+            if switch:
+                active_optimizer = torch.optim.LBFGS(model.parameters(), max_iter=50, line_search_fn='strong_wolfe')
+                lbfgs = True
+        
+        if not lbfgs:
+            active_optimizer.zero_grad()
+            loss, loss_data, loss_phys = train_step(model, active_optimizer, X_data, U_data, f, lambda_phys, X_col)
+            active_optimizer.step()
+
+            loss_window.append(loss.item())
+        else:
+            loss_data = None
+            loss_phys = None
+
+            def closure():
+                nonlocal loss_data, loss_phys
+
+                active_optimizer.zero_grad()
+                loss, d, p = train_step(model, active_optimizer, X_data, U_data, f, lambda_phys, X_col)
+                loss_data = d
+                loss_phys = p
+
+                return loss
+            
+            loss = active_optimizer.step(closure)
+        '''
+
+        if epoch < MAX_SWITCH:
+            active_optimizer.zero_grad()
+            loss, loss_data, loss_phys = train_step(model, active_optimizer, X_data, U_data, f, lambda_phys, X_col)
+            active_optimizer.step()
+
+        else:
+            loss_data = None
+            loss_phys = None
+
+            def closure():
+                nonlocal loss_data, loss_phys
+
+                active_optimizer.zero_grad()
+                loss, d, p = train_step(model, active_optimizer, X_data, U_data, f, lambda_phys, X_col)
+                loss_data = d
+                loss_phys = p
+
+                return loss
+            
+            loss = active_optimizer.step(closure)
+
 
         losses.append(loss.item())
         losses_data.append(loss_data.item())
         losses_phys.append(loss_phys.item())
         
-        loss.backward()
-        optimizer.step()
 
         # Call epoch end callbacks
         for callback in callbacks:
-            if isinstance(callback, FramesCallback):
+            if isinstance(callback, LoggingCallback):
                 callback.on_epoch_end(epoch, loss.item(), loss_data.item(), loss_phys.item(), model=model)
-            elif isinstance(callback, CheckpointCallback):
-                callback.set_checkpoint_data(model, optimizer, epoch, loss.item())
             else:
-                callback.on_epoch_end(epoch, loss.item(), loss_data.item(), loss_phys.item())
+                callback.on_epoch_end(epoch, loss.item(), model=model)
+
 
     # Call train end callbacks
     for callback in callbacks:

@@ -22,7 +22,7 @@ class finiteDifference():
         self.model = model
         self.num_paths = num_paths
 
-class PINN():
+class RFF_PINN():
     def __init__(self, model, num_paths=1000):
         self.model = model
         self.num_paths = num_paths
